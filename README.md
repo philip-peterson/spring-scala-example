@@ -1,7 +1,13 @@
-To run:
+To run baremetal:
 
 ```
 mvn spring-boot:run
+```
+
+To run with nix instead:
+
+```
+nix develop --command ./mvnw spring-boot:run
 ```
 
 
