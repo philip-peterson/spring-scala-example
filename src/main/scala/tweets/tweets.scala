@@ -1,21 +1,13 @@
 package tweets
 
-import akka.actor.ActorSystem
-import akka.stream.ActorMaterializer
-import akka.stream.scaladsl.{Sink, Source}
-import org.reactivestreams.Publisher
+import java.util
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.{ApplicationRunner, SpringApplication}
 import org.springframework.context.annotation.{Bean, Configuration}
-import org.springframework.data.annotation.Id
-import org.springframework.data.mongodb.core.mapping.Document
-import org.springframework.data.mongodb.repository.ReactiveMongoRepository
+import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Service
 import org.springframework.web.bind.annotation.{GetMapping, RestController}
-import org.springframework.web.reactive.function.server.RequestPredicates._
-import org.springframework.web.reactive.function.server.RouterFunctions._
-import org.springframework.web.reactive.function.server.ServerResponse._
-import reactor.core.publisher.{Flux, Mono}
+import jakarta.persistence.{Column, Entity, GeneratedValue, GenerationType, Id}
 
 import scala.beans.BeanProperty
 import scala.collection.JavaConverters
@@ -24,11 +16,11 @@ import scala.collection.JavaConverters
 class Application {
 
   @Bean
-  def init(tr: TweetRepository): ApplicationRunner = args => {
-    val viktor = Author("viktorklang")
-    val jonas = Author("jboner")
-    val josh = Author("starbuxman")
-    val tweets = Flux.just(
+  def init(tr: TweetRepository): ApplicationRunner = _ => {
+    val viktor = "viktorklang"
+    val jonas = "jboner"
+    val josh = "starbuxman"
+    val tweets = List(
       Tweet("Woot, Konrad will be talking about #Enterprise #Integration done right! #akka #alpakka", viktor),
       Tweet(
         s"""#scala implicits can easily be used to model Capabilities, but can they encode Obligations easily?
@@ -39,91 +31,84 @@ class Application {
       Tweet("a reminder: @SpringBoot lets you pair-program with the #Spring team.", josh),
       Tweet("whatever your next #platform is, don't build it yourself. \n\nEven companies with the $$ and motivation to do it fail. a LOT.", josh)
     )
-    tr
-      .deleteAll()
-      .thenMany(tr.saveAll(tweets))
-      .thenMany(tr.findAll())
-      .subscribe((t: Tweet) => println(
-        s"""=====================================================
-           |@${t.author.handle} ${t.hashtags}
-           |${t.text}
-         """.stripMargin
-      ))
+    tr.deleteAll()
+    tr.saveAll(JavaConverters.seqAsJavaList(tweets))
+    tr.findAll().forEach((t: Tweet) => println(
+      s"""=====================================================
+         |@${t.getAuthor.handle} ${t.getHashtags}
+         |${t.getText}
+       """.stripMargin
+    ))
   }
 }
 
-@Configuration
-class AkkaConfiguration {
+@Entity
+class Tweet {
 
-  @Bean def actorSystem() = ActorSystem.create("bootifulScala")
+  @Id
+  @GeneratedValue(strategy = GenerationType.IDENTITY)
+  var id: java.lang.Long = _
 
-  @Bean def actorMaterializer() = ActorMaterializer.create(this.actorSystem())
+  @Column(length = 4096)
+  var text: String = _
+
+  var authorHandle: String = _
+
+  def getText: String = text
+  def setText(value: String): Unit = { text = value }
+
+  def getAuthorHandle: String = authorHandle
+  def setAuthorHandle(value: String): Unit = { authorHandle = value }
+
+  def getAuthor: Author = Author(authorHandle)
+
+  def getHashtags: util.Set[HashTag] = JavaConverters.setAsJavaSet(
+    Option(text).getOrElse("").split(" ").collect {
+      case t if t.startsWith("#") => HashTag(t.replaceAll("[^#\\w]", "").toLowerCase())
+    }.toSet
+  )
 }
+
+object Tweet {
+  def apply(text: String, authorHandle: String): Tweet = {
+    val t = new Tweet
+    t.setText(text)
+    t.setAuthorHandle(authorHandle)
+    t
+  }
+}
+
+case class Author(@BeanProperty handle: String)
+
+case class HashTag(@BeanProperty tag: String)
+
+trait TweetRepository extends JpaRepository[Tweet, java.lang.Long]
 
 @Service
-class TweetService(tr: TweetRepository, am: ActorMaterializer) {
+class TweetService(tr: TweetRepository) {
 
-  def tweets(): Publisher[Tweet] = tr.findAll()
+  def tweets(): util.List[Tweet] = tr.findAll()
 
-  def hashtags(): Publisher[HashTag] =
-    Source
-      .fromPublisher(tweets())
-      .map(t => JavaConverters.asScalaSet(t.hashtags).toSet)
-      .reduce((a, b) => a ++ b)
-      .mapConcat(identity)
-      .runWith(Sink.asPublisher(true)) {
-        am
-      }
+  def hashtags(): util.Set[HashTag] = JavaConverters.setAsJavaSet(
+    JavaConverters.asScalaBuffer(tr.findAll())
+      .flatMap(t => JavaConverters.asScalaSet(t.getHashtags))
+      .toSet
+  )
 }
-
-@Configuration
-class TweetRouteConfiguration(tweetService: TweetService) {
-
-  @Bean
-  def routes() =
-    route(GET("/tweets"), _ => ok().body(tweetService.tweets(), classOf[Tweet]))
-      .andRoute(GET("/hashtags/unique"), _ => ok().body(tweetService.hashtags(), classOf[HashTag]))
-
-}
-
 
 @RestController
 class TweetRestController(ts: TweetService) {
 
   @GetMapping(Array("/hashtags/unique"))
-  def hashtags(): Publisher[HashTag] = ts.hashtags()
+  def hashtags(): util.Set[HashTag] = ts.hashtags()
 
   @GetMapping(Array("/tweets"))
-  def tweets(): Publisher[Tweet] = ts.tweets()
+  def tweets(): util.List[Tweet] = ts.tweets()
 
   @GetMapping(Array("/ping"))
-  def ping(): Publisher[String] = Mono.just("hello world")
+  def ping(): String = "hello world"
 }
-
 
 object Application extends App {
   SpringApplication.run(classOf[Application], args: _*)
-}
-
-
-trait TweetRepository extends ReactiveMongoRepository[Tweet, String]
-
-@Document
-case class Author(@BeanProperty @Id handle: String)
-
-@Document
-case class HashTag(@BeanProperty @Id tag: String)
-
-@Document
-case class Tweet(@BeanProperty @Id text: String, @BeanProperty author: Author) {
-
-  @BeanProperty
-  var hashtags: java.util.Set[HashTag] = JavaConverters.setAsJavaSet(
-    text
-      .split(" ")
-      .collect {
-        case t if t.startsWith("#") => HashTag(t.replaceAll("[^#\\w]", "").toLowerCase())
-      }
-      .toSet
-  )
 }
